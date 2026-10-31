@@ -17,7 +17,6 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-
 MARKER = "<!-- portable-release-publisher:managed:v2 -->"
 MAX_ASSET_BYTES = 2 * 1024**3  # each release asset must be strictly smaller than 2 GiB
 TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$")
@@ -28,13 +27,11 @@ SAFE_EVENTS = {"workflow_dispatch", "push", "schedule", "repository_dispatch"}
 def setting(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
-
 def bool_setting(name: str) -> bool:
     val = setting(name, "false").lower()
     if val not in ("true", "false"):
         raise ValueError(f"{name} must be 'true' or 'false'")
     return val == "true"
-
 
 def validate_tag(tag: str, prefix: str) -> None:
     if not prefix or not TAG_RE.fullmatch(prefix + "test"):
@@ -43,7 +40,6 @@ def validate_tag(tag: str, prefix: str) -> None:
         raise ValueError("tag is required; use letters, digits, dots, underscores or dashes (max 151 characters)")
     if not tag.startswith(prefix):
         raise ValueError(f"tag must begin with the reserved prefix '{prefix}'")
-
 
 def collect_zips(patterns: str, workspace: Path) -> list[Path]:
     root = workspace.resolve(strict=True)
@@ -77,7 +73,6 @@ def collect_zips(patterns: str, workspace: Path) -> list[Path]:
         raise ValueError("GitHub permits at most 1000 assets per release (including SHA256SUMS.txt).")
     return [selected[name] for name in sorted(selected)]
 
-
 def checksums(assets: list[Path]) -> str:
     lines = []
     for asset in assets:
@@ -88,7 +83,6 @@ def checksums(assets: list[Path]) -> str:
         lines.append(f"{digest.hexdigest()}  {asset.name}")
     return "\n".join(lines) + "\n"
 
-
 def run_gh(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(["gh", *args], text=True, encoding="utf-8",
                             capture_output=True, check=False)
@@ -97,10 +91,8 @@ def run_gh(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         raise RuntimeError(f"GitHub CLI error during 'gh {args[0]} {args[1] if len(args)>1 else ''}': {detail}")
     return result
 
-
 def gh_json(*args: str) -> object:
     return json.loads(run_gh(*args).stdout)
-
 
 def view_release(tag: str, repo: str) -> dict | None:
     result = run_gh("release", "view", tag, "--repo", repo,
@@ -112,18 +104,27 @@ def view_release(tag: str, repo: str) -> dict | None:
         return None
     raise RuntimeError("Could not read release; refusing to assume it is missing: " + result.stderr.strip())
 
-
 def remote_assets_match(record: dict, zips: list[Path], sums: str, tag: str, repo: str) -> bool:
     expected = {p.name: p.stat().st_size for p in zips}
     expected["SHA256SUMS.txt"] = len(sums.encode("utf-8"))
     actual = {a.get("name"): a.get("size") for a in record.get("assets", [])}
     if actual != expected:
+        # Safe diagnostic: prints names and sizes only, never any tokens or vault data.
+        print(f"Release asset size mismatch. Expected: {expected}; GitHub: {actual}",
+              file=sys.stderr, flush=True)
         return False
     with tempfile.TemporaryDirectory(prefix="publisher-check-") as temp:
         run_gh("release", "download", tag, "--repo", repo, "--pattern", "SHA256SUMS.txt", "--dir", temp)
         sums_path = Path(temp) / "SHA256SUMS.txt"
-        return sums_path.exists() and sums_path.read_text(encoding="utf-8") == sums
-
+        if not sums_path.exists():
+            print("GitHub checksum asset was not available for verification.", file=sys.stderr, flush=True)
+            return False
+        # Exact bytes, matching the upload format. On all OSes use LF newline, not CRLF.
+        if sums_path.read_bytes() != sums.encode("utf-8"):
+            print("GitHub checksum asset content differed from local checksums.",
+                  file=sys.stderr, flush=True)
+            return False
+        return True
 
 def verify_new_draft(tag: str, repo: str, zips: list[Path], sums: str) -> None:
     remote = view_release(tag, repo)
@@ -133,7 +134,6 @@ def verify_new_draft(tag: str, repo: str, zips: list[Path], sums: str) -> None:
         raise RuntimeError("Draft release is not marked as publisher-owned")
     if not remote_assets_match(remote, zips, sums, tag, repo):
         raise RuntimeError("Draft release verification failed; leaving draft for manual inspection")
-
 
 def choose_old_releases(releases: list[dict], prefix: str, protected_tag: str,
                         keep: int, is_publisher_owned) -> list[str]:
@@ -155,7 +155,6 @@ def choose_old_releases(releases: list[dict], prefix: str, protected_tag: str,
     return [r["tagName"] for r in relevant
             if r["tagName"] not in protected and not r.get("isImmutable")]
 
-
 def prune(repo: str, prefix: str, tag: str, keep: int) -> None:
     # 1000 is enough for typical personal builder repositories. Refuse partial retention views.
     listing = gh_json("release", "list", "--repo", repo, "--limit", "1000", "--json",
@@ -172,7 +171,6 @@ def prune(repo: str, prefix: str, tag: str, keep: int) -> None:
     for old in choose_old_releases(listing, prefix, tag, keep, owned):
         print(f"Pruning previous publisher-managed release: {old}", flush=True)
         run_gh("release", "delete", old, "--repo", repo, "--cleanup-tag", "--yes")
-
 
 def main() -> int:
     files = setting("PUBLISH_FILES")
@@ -221,7 +219,9 @@ def main() -> int:
     else:
         with tempfile.TemporaryDirectory(prefix="portable-release-") as temp:
             checksum_path = Path(temp) / "SHA256SUMS.txt"
-            checksum_path.write_text(sums, encoding="utf-8")
+            # v1.0.1 HOTFIX: binary write prevents Windows LF -> CRLF conversion.
+            # The expected byte count uses sums.encode('utf-8'), so write exactly those bytes.
+            checksum_path.write_bytes(sums.encode("utf-8"))
             notes_path = Path(temp) / "notes.md"
             notes_path.write_text(
                 f"{MARKER}\n\nUnofficial portable build for personal or permitted redistribution.\n\n"
@@ -241,7 +241,6 @@ def main() -> int:
     else:
         print("Old-release pruning disabled (safe default).")
     return 0
-
 
 if __name__ == "__main__":
     try:
