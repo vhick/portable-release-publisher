@@ -1,3 +1,11 @@
+## v2.1.1 checksum compatibility fix
+
+- Windows-safe raw UTF-8 byte writing for `SHA256SUMS.txt`.
+- Byte-for-byte checksum verification, avoiding CRLF normalization discrepancies.
+- Added checksum regression tests and updated CI checkout to Node.js 24-compatible checkout v6.
+- Existing ZIP and `.paf.exe` publishing, same-repository privacy, release tags,
+  duplicate checks and optional retention are preserved.
+
 # Universal Portable Release Publisher — PAF support update (v2.1)
 
 Publish **`.zip`**, **`.paf.exe`**, or **both** as release assets in the *calling builder repository*.

@@ -168,7 +168,9 @@ def remote_assets_match(record: dict, assets: list[Path], sums: str, tag: str, r
         run_gh("release", "download", tag, "--repo", repo,
                "--pattern", "SHA256SUMS.txt", "--dir", tmp)
         found = Path(tmp) / "SHA256SUMS.txt"
-        return found.is_file() and found.read_text(encoding="utf-8") == sums
+        # Binary equality guarantees exact LF bytes on Windows, too.
+        # Text-mode reads hide CRLF differences and can cause false verification.
+        return found.is_file() and found.read_bytes() == sums.encode("utf-8")
 
 
 def verify_new_draft(tag: str, repo: str, assets: list[Path], sums: str) -> None:
@@ -260,7 +262,9 @@ def main() -> int:
     else:
         with tempfile.TemporaryDirectory(prefix="portable-release-") as tmp:
             sums_path = Path(tmp) / "SHA256SUMS.txt"
-            sums_path.write_text(sums, encoding="utf-8")
+            # Write exact UTF-8 bytes; text mode can convert LF to CRLF on Windows.
+            checksum_path = sums_path
+            checksum_path.write_bytes(sums.encode("utf-8"))
             notes_path = Path(tmp) / "notes.md"
             notes_path.write_text(
                 f"{MARKER}\n\nUnofficial portable build from this repository. "
