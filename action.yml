@@ -1,0 +1,49 @@
+name: Universal Portable Release Publisher
+description: Publish finished portable ZIPs directly to GitHub Releases in the caller's own repository.
+inputs:
+  files:
+    description: Semicolon/newline-separated ZIP glob patterns relative to the calling repository workspace.
+    required: true
+  tag:
+    description: Stable release tag; use an upstream version or source revision, e.g. portable-v1.2.3-r1.
+    required: true
+  release-title:
+    description: Human-friendly release title (defaults to the tag).
+    required: false
+    default: ''
+  tag-prefix:
+    description: Reserved prefix for publisher-managed tags, e.g. portable-.
+    required: false
+    default: 'portable-'
+  keep-releases:
+    description: Number of recent publisher-managed releases to keep if pruning is enabled.
+    required: false
+    default: '3'
+  prune:
+    description: Delete old mutable releases created by this publisher. Off by default for safety.
+    required: false
+    default: 'false'
+  dry-run:
+    description: Inspect matched ZIPs, tag and intended changes; never upload/delete.
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Validate and publish portable ZIP(s)
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TARGET_REPO: ${{ github.repository }}
+        SOURCE_SHA: ${{ github.sha }}
+        WORKSPACE_ROOT: ${{ github.workspace }}
+        ACTION_EVENT: ${{ github.event_name }}
+        ACTION_RUN_ID: ${{ github.run_id }}
+        PUBLISH_FILES: ${{ inputs.files }}
+        PUBLISH_TAG: ${{ inputs.tag }}
+        PUBLISH_TITLE: ${{ inputs['release-title'] }}
+        PUBLISH_PREFIX: ${{ inputs['tag-prefix'] }}
+        PUBLISH_KEEP: ${{ inputs['keep-releases'] }}
+        PUBLISH_PRUNE: ${{ inputs.prune }}
+        PUBLISH_DRY_RUN: ${{ inputs['dry-run'] }}
+      run: python "$GITHUB_ACTION_PATH/scripts/publish.py"

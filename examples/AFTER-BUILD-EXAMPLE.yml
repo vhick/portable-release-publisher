@@ -1,0 +1,23 @@
+# EXAMPLE ONLY — NOT A STANDALONE WORKFLOW. Copy these into a new builder's EXISTING workflow.
+# 1) At the job level, add:
+# permissions:
+#   contents: write
+# 2) At the bottom of the existing build job, AFTER it generates the finished ZIP, add:
+
+- name: Identify upstream source revision
+  id: upstream_info
+  shell: bash
+  run: |
+    # Replace 'upstream/MyApp' with this builder's actual cloned source directory.
+    HASH="$(git -C upstream/MyApp rev-parse --short=12 HEAD)"
+    echo "tag=portable-src-${HASH}-r1" >> "$GITHUB_OUTPUT"
+
+- name: Publish portable ZIP to same repository
+  uses: vhick/portable-release-publisher@v1
+  with:
+    files: 'dist/MyAppPortable-*.zip'  # Adjust to actual FINISHED ZIP
+    tag: ${{ steps.upstream_info.outputs.tag }}
+    release-title: MyApp Portable
+    keep-releases: '3'
+    prune: 'false'
+    dry-run: 'true' # First test; change to false for real publishing

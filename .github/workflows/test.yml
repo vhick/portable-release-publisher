@@ -1,0 +1,19 @@
+name: Validate portable publisher
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout publisher
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run local tests
+        run: python -m unittest discover -s tests -v
