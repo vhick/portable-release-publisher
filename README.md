@@ -1,105 +1,87 @@
-# Universal Portable GitHub Release Publisher v2.0
+# Universal Portable Release Publisher — PAF support update (v2.1)
 
-Reusable **composite action** for independent portable builders. Uploads completed ZIPs **directly** to Releases in the **calling repository**.
+Publish **`.zip`**, **`.paf.exe`**, or **both** as release assets in the *calling builder repository*.
 
-- Public caller = public release. Private caller = private release.
-- The publisher does not target other repositories, does not create Actions artifacts, and never requires a personal access token for same-repository publishing.
-- Compatible with GitHub-hosted Windows and Linux runners with Python and GitHub CLI.
-- Requires a unique **stable release tag** corresponding to the upstream source version/revision **and** your builder revision.
-- Checks ZIP validity, size, SHA-256; includes `SHA256SUMS.txt` as a release asset.
-- Creates a draft and checks uploaded file names, sizes and checksum list before publishing it.
-- For the **same tag**, skips an identical already-published release, rejects files that changed, and refuses to overwrite manually created releases or drafts.
-- Optional retention keeps 3 latest publisher-managed **mutable** releases by default when `prune: true` is enabled. Drafts, manually authored releases, and immutable releases are never deleted.
+This is a drop-in nonbreaking update of the v2 shared action. Its action inputs, SHA-256 checksum filename, draft-first release flow, managed-release marker, deduplication, optional release pruning, and visibility handling are preserved.
 
-## Install once
+## Supported output formats
 
-Create public `vhick/portable-release-publisher` on GitHub.com. Clone it in GitHub Desktop and copy the **contents** of this `publisher` directory into the clone root (so `action.yml` is at the top level). Commit and push.
+| Output | Example file | `files` glob |
+|---|---|---|
+| NATIVE ZIP | `MyAppPortable-1.2.zip` | `dist/*.zip` |
+| PortableApps `.paf.exe` | `MyAppPortable_1.2.paf.exe` | `dist/*.paf.exe` |
+| BOTH | ZIP and PAF installer | `dist/*.zip;dist/*.paf.exe` or multiline patterns |
 
-The included `.github/workflows/test.yml` runs Python tests in the shared repository without publishing any Releases or storing artifacts.
+**`.paf.exe` is a PortableApps.com installer**, not a regular ZIP file. The publisher checks its Windows PE executable header rather than trying to parse it as a ZIP. It *does not execute* the installer, and it does not certify that the installer fully complies with the PortableApps format. Regular `.exe` installers or launchers are **not** published by this action.
 
-After the tests are green, create Git tag **v1** on the publisher repository (on GitHub.com: Releases > Draft a new release > choose `v1` as a new tag targeting `main`, publish the publisher-code release with **no binaries**). Your builders can then reference `vhick/portable-release-publisher@v1`.
+A single GitHub Release can contain both packages and one `SHA256SUMS.txt` file with a digest for each file.
 
-For maximum supply-chain stability, reference the tested **40-character commit SHA** instead of `@v1`. Keep `v1` stable; introduce new major tags for incompatible future changes.
+## Integration in a builder
 
-## Integration for a new standalone builder
-
-Preserve the current checkout/source-fetch/build/packaging steps. In that SAME job after the portable ZIP exists:
+After the same job finishes building and packaging:
 
 ```yaml
+# At the JOB level (not inside steps):
 permissions:
   contents: write
 
-jobs:
-  build:
-    runs-on: windows-latest  # keep your builder's existing OS and jobs
-    steps:
-      # ... YOUR EXISTING STEPS THAT PRODUCE dist/MyAppPortable.zip ...
-      - name: Publish portable ZIP to this repository
-        uses: vhick/portable-release-publisher@v1
-        with:
-          files: 'dist/MyAppPortable-*.zip'  # CHANGE to actual finished ZIP path
-          tag: 'portable-v1.2.3-r1'          # CHANGE when upstream OR builder changes
-          release-title: 'MyApp Portable v1.2.3 (r1)'
-          keep-releases: '3'
-          prune: 'false'                    # set true only after first releases work
+# In existing build job's steps, AFTER ZIP/PAF generation:
+- name: Publish portable packages
+  uses: vhick/portable-release-publisher@v1.1.0
+  with:
+    files: |
+      dist/*.zip
+      dist/*.paf.exe
+    tag: 'portable-v1.2.3-r1'
+    release-title: 'MyApp Portable v1.2.3 (r1)'
+    keep-releases: '3'
+    prune: 'false'
+    dry-run: 'true'
 ```
 
-**Important:** `permissions:` must be added at the right job/workflow level, not inserted into `steps:`. If the workflow uses multiple jobs, the publishing step must run in the one that still has the ZIP on disk. A separate publishing job requires a file-transfer strategy (often temporary Actions artifacts).
+The `dist` folder and stable tag are **examples**. Replace them with your actual build output paths/version-detection expression. For a real publish change `dry-run` to `'false'`.
 
-For stable automatic names based on the upstream source commit, add the following before the publish step (ONLY if the builder cloned Git source to that location):
+If no PAF installer is produced for the selected NATIVE mode, its unmatched glob is harmless as long as a finished ZIP exists. For PAF-only builds, use only `dist/*.paf.exe`. The action does not create `.paf.exe`; your *builder* must generate it first.
 
-```yaml
-      - name: Identify upstream source revision
-        id: upstream
-        shell: bash
-        run: |
-          # Change upstream/MyApp to your actual upstream clone directory.
-          HASH="$(git -C upstream/MyApp rev-parse --short=12 HEAD)"
-          echo "tag=portable-src-${HASH}-r1" >> "$GITHUB_OUTPUT"
-      - name: Publish portable ZIP
-        uses: vhick/portable-release-publisher@v1
-        with:
-          files: 'dist/MyAppPortable-*.zip'
-          tag: ${{ steps.upstream.outputs.tag }}
-          release-title: MyApp Portable
-          keep-releases: '3'
-          prune: 'false'
+## Inputs (unchanged)
+
+| Input | Default | Description |
+|---|---|---|
+| `files` | Required | Semicolon/newline-separated relative glob patterns for output packages |
+| `tag` | Required | Stable tag starting with `portable-` by default |
+| `release-title` | Tag | Human-readable label |
+| `tag-prefix` | `portable-` | Prefix of managed release tags |
+| `keep-releases` | `3` | Maximum retained recent mutable managed releases if pruning enabled |
+| `prune` | `false` | Opt-in deletion of old publisher-managed mutable releases |
+| `dry-run` | `false` | Preview without publishing/deleting |
+
+## What stays the same
+
+- Repository-private builds publish **private** releases in the same repository; public builds publish public releases.
+- Uses the caller's default `GITHUB_TOKEN` and needs `contents: write` in the publishing job.
+- Creates a draft, uploads files and `SHA256SUMS.txt`, checks remote filenames/sizes/checksum file, and publishes only afterward.
+- If a release has exactly the same tag and assets, skips it. If package content changes, change the builder revision/tag. Do **not** overwrite immutable or existing conflicting releases.
+- Only old releases with the previous v2 marker `<!-- portable-release-publisher:managed:v2 -->` can be pruned. Default pruning is off.
+- No `actions/upload-artifact` is required if packages are made in the **same job** and uploaded directly from the runner.
+- Never use this from untrusted pull-request workflows. Building untrusted upstream code inside a write-permission job carries supply-chain risk.
+
+## Limits / validation
+
+- Every file must be smaller than **2 GiB**. GitHub supports up to 1,000 assets per release; the action reserves one for checksums.
+- A `.paf.exe` is checked only for its `.paf.exe` suffix, size, and minimal Windows PE format. Use a real PortableApps installer build and functional test for full PAF compatibility.
+- ZIP validity is checked using the Python `zipfile` structural check; this is not a complete installed-app smoke test.
+- If you use multiple packaging jobs on separate runners, the files are not automatically shared; publish within the packaging job or explicitly implement a safe transfer mechanism.
+- Filename collisions across package directories are rejected.
+- Public redistribution requires upstream licensing permission. Published `.paf.exe` packages may trigger antivirus warnings depending on signing and origin; this action cannot prevent that.
+- Github CLI (`gh`) and Python must be available on the runner. These are present on standard GitHub-hosted Windows and Ubuntu images, but verify in your environment.
+- A release might become immutable once published, in which case old-release cleanup cannot delete it.
+
+## Test command
+
+```sh
+python -m unittest discover -s tests -v
 ```
 
-If upstream code remains the same but your packaging script changes, increment `r1` to `r2` so the new ZIP gets a new tag. The publisher refuses to replace different ZIPs under an existing tag.
+No release publishing is performed by the publisher repository's tests.
 
-## Safety, permissions, and retention
-
-1. Use `workflow_dispatch` and/or controlled `push` triggers. **Never** publish from untrusted PR events. The publisher blocks them.
-2. Set `permissions: contents: write` on the publishing job. GitHub's built-in `GITHUB_TOKEN` writes to the same repo only. Keep `actions/checkout` set to `persist-credentials: false` when practical.
-3. `prune: false` is the default. After testing, switch to `prune: true` if you want to keep the latest 3 mutable releases **created by this publisher**. Old releases will be deleted; preserve important versions separately. Immutable releases cannot be pruned and may exceed 3 total.
-4. GitHub's Releases asset limit is **under 2 GiB per file** and **1000 assets per release**. GitHub does not state unlimited Actions runtime; private Komorebi still consumes included compute usage.
-5. Avoid any other `actions/upload-artifact` step once direct publishing works. Temporary copies already stored there continue counting until deleted/expired.
-6. In public builder repositories, publish third-party programs only if redistribution is allowed by their licenses. Private personal usage does not grant permission to redistribute publicly.
-7. **Trust model:** same-job publishing avoids temporary Actions artifacts, but the job has write-capable GitHub permissions while building third-party code. Don't run untrusted PRs; review fetched source/build scripts. A separate isolated publishing job is safer for untrusted code but needs a transfer method and potentially temporary storage.
-8. Do not enable GitHub release immutability and expect automatic deletion of old immutable releases. This publisher skips them.
-9. GitHub can change limits, permission requirements, or installed runner tools. We cannot guarantee that no limit will ever be reached; monitor billing and use a spending hard stop.
-
-## Inputs
-
-| Input | Required | Default | Purpose |
-|---|---|---|---|
-| `files` | Yes | | Semicolon/newline-separated ZIP globs inside the builder workspace |
-| `tag` | Yes | | Stable tag beginning `portable-` by default |
-| `release-title` | No | Tag | Display title |
-| `tag-prefix` | No | `portable-` | Reserved namespace for publisher-owned releases |
-| `keep-releases` | No | `3` | Keep N recent releases when pruning is enabled; `0` disables pruning |
-| `prune` | No | `false` | Opt-in automatic old-release deletion |
-| `dry-run` | No | `false` | Validate and report without publishing |
-
-## Troubleshooting
-
-- **No ZIP found:** Correct the `files` glob; it must point to the final packaged ZIP, not the downloaded original source.
-- **403 Resource not accessible:** Set `contents: write` for the build job, and ensure release policies permit publishing.
-- **Existing tag has different files:** Increment builder revision in `tag` (`-r2`) rather than overwrite.
-- **Draft already exists:** Open Releases, review the draft and any partial assets. Remove it manually if appropriate, then retry.
-- **Files in a separate build job:** This action cannot see files on a different runner. Call it in the package job or explicitly transfer the ZIP.
-- **Old releases not removed:** `prune` defaults to `false`; immutable and manually created releases are intentionally excluded.
-- **A workflow-change commit fails to publish:** On some GitHub API paths, release creation against a commit that modifies workflow files can require additional workflow authorization. Try a later manual run on the established default branch; do not broaden credentials without reviewing the error.
-
-Official references: https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases , https://cli.github.com/manual/gh_release_create , https://docs.github.com/en/actions/reference/workflows-and-actions/metadata-syntax .
+References: https://portableapps.com/development/portableapps.com_format and https://cli.github.com/manual/gh_release_create .

@@ -1,36 +1,36 @@
 name: Universal Portable Release Publisher
-description: Publish finished portable ZIPs directly to GitHub Releases in the caller's own repository.
+description: Publish portable ZIPs and PortableApps .paf.exe installers to Releases in the calling repository.
 inputs:
   files:
-    description: Semicolon/newline-separated ZIP glob patterns relative to the calling repository workspace.
+    description: "Semicolon/newline-separated globs for finished .zip and/or .paf.exe packages."
     required: true
   tag:
-    description: Stable release tag; use an upstream version or source revision, e.g. portable-v1.2.3-r1.
+    description: "Stable release tag, e.g. portable-v1.2.3-r1. Must begin with tag-prefix."
     required: true
   release-title:
-    description: Human-friendly release title (defaults to the tag).
+    description: "Friendly release name (defaults to tag)."
     required: false
     default: ''
   tag-prefix:
-    description: Reserved prefix for publisher-managed tags, e.g. portable-.
+    description: "Reserved prefix for publisher-owned release tags."
     required: false
     default: 'portable-'
   keep-releases:
-    description: Number of recent publisher-managed releases to keep if pruning is enabled.
+    description: "Number of recent mutable publisher-managed releases to keep if prune=true."
     required: false
     default: '3'
   prune:
-    description: Delete old mutable releases created by this publisher. Off by default for safety.
+    description: "Opt-in cleanup of older mutable publisher-managed releases; defaults off."
     required: false
     default: 'false'
   dry-run:
-    description: Inspect matched ZIPs, tag and intended changes; never upload/delete.
+    description: "Preview selected files and checksum without uploading or deleting."
     required: false
     default: 'false'
 runs:
   using: composite
   steps:
-    - name: Validate and publish portable ZIP(s)
+    - name: Validate and publish portable ZIP or PAF installer
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,14 @@
+# Example STEP ONLY (insert inside your existing builder job AFTER package creation).
+# Add 'permissions: contents: write' at that job level.
+# For a first test, dry-run: 'true'; change to false after checking output.
+- name: Publish native ZIP and PortableApps installer
+  uses: vhick/portable-release-publisher@v1.1.0
+  with:
+    files: |
+      dist/*.zip
+      dist/*.paf.exe
+    tag: 'portable-v1.2.3-r1' # Replace with upstream version and builder revision
+    release-title: 'MyApp Portable v1.2.3'
+    keep-releases: '3'
+    prune: 'false'
+    dry-run: 'true'

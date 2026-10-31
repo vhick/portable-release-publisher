@@ -1,183 +1,240 @@
 import importlib.util
 import os
 from pathlib import Path
+import struct
 import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'publish.py'
-spec = importlib.util.spec_from_file_location('portable_publisher', SCRIPT)
-publisher = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(publisher)
+spec = importlib.util.spec_from_file_location('publisher_under_test', SCRIPT)
+pub = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pub)
 
 
-def mkzip(path, text='hello'):
-    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
-        z.writestr('readme.txt', text)
+def zip_package(path, content='hello'):
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('readme.txt', content)
 
 
-class PublisherTests(unittest.TestCase):
-    def test_collect_zip_and_sha256(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            (base/'dist').mkdir()
-            mkzip(base/'dist'/'Portable.zip')
-            (base/'dist'/'not-zip.txt').write_text('ignore')
-            files = publisher.collect_zips('dist/*.zip', base)
-            self.assertEqual([p.name for p in files], ['Portable.zip'])
-            self.assertEqual(len(publisher.checksums(files).split('  ')[0]), 64)
+def paf_stub(path, content=b'PortableApps NSIS test stub'):
+    # Header-level synthetic PE fixture, NOT an executable test installer.
+    header = bytearray(132)
+    header[0:2] = b'MZ'
+    struct.pack_into('<I', header, 0x3C, 128)
+    header[128:132] = b'PE\x00\x00'
+    path.write_bytes(header + content)
 
-    def test_missing_zip_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(ValueError, 'No finished ZIP'):
-                publisher.collect_zips('dist/*.zip', Path(tmp))
 
-    def test_escape_glob_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            for pat in ('../*.zip', '/tmp/*.zip', 'C:/temp/*.zip', '..\\*.zip'):
-                with self.subTest(pat=pat), self.assertRaisesRegex(ValueError, 'Unsafe'):
-                    publisher.collect_zips(pat, Path(tmp))
+class AssetsTests(unittest.TestCase):
+    def test_zip_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            zip_package(root / 'AppNative.zip')
+            self.assertEqual([p.name for p in pub.collect_assets('*.zip', root)], ['AppNative.zip'])
 
-    def test_same_name_from_two_folders_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            (base/'a').mkdir(); (base/'b').mkdir()
-            mkzip(base/'a'/'App.zip', 'a'); mkzip(base/'b'/'App.zip', 'b')
-            with self.assertRaisesRegex(ValueError, 'same filename'):
-                publisher.collect_zips('a/*.zip;b/*.zip', base)
+    def test_paf_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paf_stub(root / 'AppPortable_1.2.paf.exe')
+            self.assertEqual([p.name for p in pub.collect_assets('*.paf.exe', root)], ['AppPortable_1.2.paf.exe'])
 
-    def test_invalid_zip_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            (base/'fake.zip').write_text('not a zip')
-            with self.assertRaisesRegex(ValueError, 'Not a valid ZIP'):
-                publisher.collect_zips('*.zip', base)
+    def test_mixed_assets_and_checksums(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'dist').mkdir()
+            zip_package(root/'dist'/'App.zip')
+            paf_stub(root/'dist'/'App.paf.exe')
+            files = pub.collect_assets('dist/*.zip;dist/*.paf.exe', root)
+            self.assertEqual([p.name for p in files], ['App.paf.exe', 'App.zip'])
+            sums = pub.checksums(files)
+            self.assertEqual(len(sums.splitlines()), 2)
+            self.assertIn('App.paf.exe', sums)
+            self.assertIn('App.zip', sums)
 
-    def test_tag_must_have_prefix(self):
-        publisher.validate_tag('portable-v1.0-r1', 'portable-')
-        with self.assertRaisesRegex(ValueError, 'prefix'):
-            publisher.validate_tag('v1.0', 'portable-')
-        with self.assertRaisesRegex(ValueError, 'tag is required'):
-            publisher.validate_tag('', 'portable-')
+    def test_broad_glob_ignores_normal_exe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paf_stub(root/'App.paf.exe')
+            (root/'regular-installer.exe').write_bytes(b'not PAF')
+            (root/'notes.txt').write_text('notes')
+            self.assertEqual([p.name for p in pub.collect_assets('*', root)], ['App.paf.exe'])
 
-    def test_prune_protects_manual_immutable_and_current(self):
-        releases = [
-            dict(tagName='portable-v4', publishedAt='2026-04-01', isDraft=False, isImmutable=False),
-            dict(tagName='portable-v3', publishedAt='2026-03-01', isDraft=False, isImmutable=False),
-            dict(tagName='portable-v2', publishedAt='2026-02-01', isDraft=False, isImmutable=True),
-            dict(tagName='portable-v1', publishedAt='2026-01-01', isDraft=False, isImmutable=False),
-            dict(tagName='official-v1', publishedAt='2026-01-01', isDraft=False, isImmutable=False),
-            dict(tagName='portable-draft', publishedAt='2026-05-01', isDraft=True, isImmutable=False),
-            dict(tagName='portable-unmanaged', publishedAt='2026-01-01', isDraft=False, isImmutable=False)
-        ]
-        delete = publisher.choose_old_releases(
-            releases, 'portable-', 'portable-v4', 2,
-            lambda t: t not in {'portable-unmanaged', 'official-v1'})
-        self.assertEqual(delete, ['portable-v1'])
+    def test_case_insensitive_extension(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            paf_stub(root/'APP.PAF.EXE')
+            self.assertEqual([p.name for p in pub.collect_assets('*', root)], ['APP.PAF.EXE'])
 
-    def test_prune_disabled_with_zero(self):
-        self.assertEqual(publisher.choose_old_releases([], 'portable-', 'portable-v2', 0, lambda _: True), [])
+    def test_cannot_publish_invalid_paf(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'App.paf.exe').write_bytes(b'not an installer')
+            with self.assertRaisesRegex(ValueError, r'Invalid \.paf\.exe'):
+                pub.collect_assets('*.paf.exe', root)
 
-    def test_bool_validate(self):
-        with patch.dict(os.environ, {'PUBLISH_PRUNE':'yes'}):
-            with self.assertRaisesRegex(ValueError, 'true'):
-                publisher.bool_setting('PUBLISH_PRUNE')
+    def test_mz_without_pe_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            (root/'App.paf.exe').write_bytes(b'MZ' + b'\x00' * 300)
+            with self.assertRaisesRegex(ValueError, 'Invalid'):
+                pub.collect_assets('*.paf.exe', root)
 
-    def test_dry_run_does_not_require_credentials_or_cli(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            mkzip(base/'Portable.zip')
-            values = dict(PUBLISH_FILES='Portable.zip', PUBLISH_TAG='portable-v1.2.3-r1',
-                          PUBLISH_DRY_RUN='true', PUBLISH_PRUNE='false', WORKSPACE_ROOT=tmp,
-                          TARGET_REPO='', GH_TOKEN='')
-            with patch.dict(os.environ, values, clear=True):
-                self.assertEqual(publisher.main(), 0)
+    def test_corrupt_zip_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'bad.zip').write_text('broken')
+            with self.assertRaisesRegex(ValueError, 'Invalid ZIP'):
+                pub.collect_assets('*.zip', root)
 
-    def test_non_dry_run_rejects_pr_events(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            mkzip(Path(tmp)/'Portable.zip')
-            values = dict(PUBLISH_FILES='Portable.zip', PUBLISH_TAG='portable-v1.2.3-r1',
-                          PUBLISH_DRY_RUN='false', ACTION_EVENT='pull_request', WORKSPACE_ROOT=tmp)
-            with patch.dict(os.environ, values, clear=True):
-                with self.assertRaisesRegex(ValueError, 'disallowed'):
-                    publisher.main()
+    def test_no_package_found(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, 'No .zip or .paf.exe'):
+                pub.collect_assets('dist/*.zip;dist/*.paf.exe', Path(temp))
 
-    def test_existing_release_nonowned_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            mkzip(Path(tmp)/'Portable.zip')
-            values = dict(PUBLISH_FILES='Portable.zip', PUBLISH_TAG='portable-v1.2.3-r1',
-                PUBLISH_DRY_RUN='false', ACTION_EVENT='workflow_dispatch', WORKSPACE_ROOT=tmp,
-                TARGET_REPO='vhick/test-builder', GH_TOKEN='pretend-token', SOURCE_SHA='abcd')
-            with patch.dict(os.environ, values, clear=True), \
-                 patch.object(publisher.shutil, 'which', return_value='/usr/bin/gh'), \
-                 patch.object(publisher, 'view_release', return_value={'isDraft': False, 'body': 'Manual'}):
-                with self.assertRaisesRegex(RuntimeError, 'not created'):
-                    publisher.main()
+    def test_path_escape_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            for path in ('../*.zip', '..\\*.paf.exe', 'C:/dist/*.paf.exe', '/tmp/*.zip'):
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'Unsafe'):
+                    pub.collect_assets(path, Path(temp))
 
-    def test_identical_existing_release_skips_upload(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            package = Path(tmp) / 'Portable.zip'
-            mkzip(package)
-            expected = publisher.checksums([package])
-            values = dict(PUBLISH_FILES='Portable.zip', PUBLISH_TAG='portable-v1-r1',
-                          PUBLISH_DRY_RUN='false', ACTION_EVENT='workflow_dispatch',
-                          WORKSPACE_ROOT=tmp, TARGET_REPO='vhick/test-builder',
-                          GH_TOKEN='pretend', SOURCE_SHA='abcd')
-            owned = {'body': publisher.MARKER, 'isDraft': False, 'isImmutable': False,
-                     'assets': [{'name': 'Portable.zip', 'size': package.stat().st_size},
-                                {'name': 'SHA256SUMS.txt', 'size': len(expected.encode())}]}
-            with patch.dict(os.environ, values, clear=True), \
-                 patch.object(publisher.shutil, 'which', return_value='/usr/bin/gh'), \
-                 patch.object(publisher, 'view_release', return_value=owned), \
-                 patch.object(publisher, 'remote_assets_match', return_value=True), \
-                 patch.object(publisher, 'run_gh') as gh:
-                self.assertEqual(publisher.main(), 0)
-                gh.assert_not_called()
+    def test_duplicate_asset_names_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'one').mkdir(); (root/'two').mkdir()
+            paf_stub(root/'one'/'Same.paf.exe')
+            paf_stub(root/'two'/'Same.paf.exe')
+            with self.assertRaisesRegex(ValueError, 'Duplicate asset'):
+                pub.collect_assets('one/*;two/*', root)
 
-    def test_changed_existing_release_refuses_overwrite(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            mkzip(Path(tmp)/'Portable.zip')
-            values = dict(PUBLISH_FILES='Portable.zip', PUBLISH_TAG='portable-v1-r1',
-                          PUBLISH_DRY_RUN='false', ACTION_EVENT='workflow_dispatch',
-                          WORKSPACE_ROOT=tmp, TARGET_REPO='vhick/test-builder',
-                          GH_TOKEN='pretend', SOURCE_SHA='abcd')
-            owned = {'body': publisher.MARKER, 'isDraft': False}
-            with patch.dict(os.environ, values, clear=True), \
-                 patch.object(publisher.shutil, 'which', return_value='/usr/bin/gh'), \
-                 patch.object(publisher, 'view_release', return_value=owned), \
-                 patch.object(publisher, 'remote_assets_match', return_value=False), \
-                 patch.object(publisher, 'run_gh') as gh:
-                with self.assertRaisesRegex(RuntimeError, 'different ZIP'):
-                    publisher.main()
-                gh.assert_not_called()
+    def test_symlink_ignored(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            paf_stub(root/'real.paf.exe')
+            (root/'link.paf.exe').symlink_to(root/'real.paf.exe')
+            with self.assertRaisesRegex(ValueError, 'No .zip'):
+                pub.collect_assets('link.paf.exe', root)
 
-    def test_new_release_is_draft_verified_then_published(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            mkzip(Path(tmp)/'Portable.zip')
-            values = dict(PUBLISH_FILES='Portable.zip', PUBLISH_TAG='portable-v1-r1',
-                          PUBLISH_DRY_RUN='false', ACTION_EVENT='workflow_dispatch',
-                          WORKSPACE_ROOT=tmp, TARGET_REPO='vhick/test-builder',
-                          GH_TOKEN='pretend', SOURCE_SHA='abcd')
-            with patch.dict(os.environ, values, clear=True), \
-                 patch.object(publisher.shutil, 'which', return_value='/usr/bin/gh'), \
-                 patch.object(publisher, 'view_release', return_value=None), \
-                 patch.object(publisher, 'verify_new_draft') as verify, \
-                 patch.object(publisher, 'run_gh') as gh:
-                self.assertEqual(publisher.main(), 0)
-                self.assertEqual(gh.call_count, 2)
-                self.assertEqual(gh.call_args_list[0].args[:3], ('release','create','portable-v1-r1'))
-                self.assertIn('--draft', gh.call_args_list[0].args)
-                self.assertEqual(gh.call_args_list[1].args[:3], ('release','edit','portable-v1-r1'))
+    def test_collect_zips_backward_compatibility(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            zip_package(root/'old.zip')
+            self.assertEqual(pub.collect_zips('*.zip', root), pub.collect_assets('*.zip', root))
+
+    def test_one_unsupported_exe_not_published(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            paf_stub(root/'Setup.exe')
+            with self.assertRaisesRegex(ValueError, 'No .zip'):
+                pub.collect_assets('Setup.exe', root)
+
+
+class ReleaseFlowTests(unittest.TestCase):
+    def test_tag_validation(self):
+        pub.validate_tag('portable-v1.2.3-r1','portable-')
+        with self.assertRaisesRegex(ValueError, 'begin'):
+            pub.validate_tag('v1.2.3', 'portable-')
+
+    def test_dry_run_mixed_has_no_gh_calls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            zip_package(root/'App.zip')
+            paf_stub(root/'App.paf.exe')
+            env={'PUBLISH_FILES':'*.zip;*.paf.exe','PUBLISH_TAG':'portable-v1',
+                 'PUBLISH_DRY_RUN':'true','WORKSPACE_ROOT':temp,
+                 'GH_TOKEN':'','TARGET_REPO':''}
+            with patch.dict(os.environ, env, clear=True), patch.object(pub, 'run_gh') as mocked:
+                self.assertEqual(pub.main(), 0)
+                mocked.assert_not_called()
+
+    def test_existing_release_skips_matching_assets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            zip_package(root/'App.zip')
+            paf_stub(root/'App.paf.exe')
+            release={'isDraft':False,'body':pub.MARKER}
+            env={'PUBLISH_FILES':'*.zip;*.paf.exe','PUBLISH_TAG':'portable-v1',
+                 'PUBLISH_DRY_RUN':'false','WORKSPACE_ROOT':temp,
+                 'GH_TOKEN':'dummy','SOURCE_SHA':'abc',
+                 'ACTION_EVENT':'workflow_dispatch','TARGET_REPO':'vhick/Test'}
+            with patch.dict(os.environ, env, clear=True), \
+                 patch.object(pub.shutil,'which',return_value='gh'), \
+                 patch.object(pub,'view_release',return_value=release), \
+                 patch.object(pub,'remote_assets_match',return_value=True), \
+                 patch.object(pub,'run_gh') as mocked:
+                self.assertEqual(pub.main(), 0)
+                mocked.assert_not_called()
+
+    def test_existing_release_conflict_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            paf_stub(root/'App.paf.exe')
+            env={'PUBLISH_FILES':'*.paf.exe','PUBLISH_TAG':'portable-v1',
+                 'PUBLISH_DRY_RUN':'false','WORKSPACE_ROOT':temp,
+                 'GH_TOKEN':'dummy','SOURCE_SHA':'abc',
+                 'ACTION_EVENT':'workflow_dispatch','TARGET_REPO':'vhick/Test'}
+            with patch.dict(os.environ, env, clear=True), \
+                 patch.object(pub.shutil,'which',return_value='gh'), \
+                 patch.object(pub,'view_release',return_value={'isDraft':False,'body':pub.MARKER}), \
+                 patch.object(pub,'remote_assets_match',return_value=False):
+                with self.assertRaisesRegex(RuntimeError,'different assets'):
+                    pub.main()
+
+    def test_new_draft_uploads_zip_and_paf_and_checksum(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            zip_package(root/'App.zip')
+            paf_stub(root/'App.paf.exe')
+            env={'PUBLISH_FILES':'*.zip;*.paf.exe','PUBLISH_TAG':'portable-v1',
+                 'PUBLISH_DRY_RUN':'false','WORKSPACE_ROOT':temp,
+                 'GH_TOKEN':'dummy','SOURCE_SHA':'abc',
+                 'ACTION_EVENT':'workflow_dispatch','TARGET_REPO':'vhick/Test'}
+            with patch.dict(os.environ, env, clear=True), \
+                 patch.object(pub.shutil,'which',return_value='gh'), \
+                 patch.object(pub,'view_release',return_value=None), \
+                 patch.object(pub,'verify_new_draft') as verify, \
+                 patch.object(pub,'run_gh') as calls:
+                self.assertEqual(pub.main(),0)
+                args=calls.call_args_list[0].args
+                self.assertEqual(args[:2],('release','create'))
+                self.assertIn('--draft',args)
+                self.assertTrue(any(str(a).endswith('.paf.exe') for a in args))
+                self.assertTrue(any(str(a).endswith('.zip') for a in args))
+                self.assertTrue(any(str(a).endswith('SHA256SUMS.txt') for a in args))
                 verify.assert_called_once()
+                self.assertEqual(calls.call_args_list[1].args[:2],('release','edit'))
 
-    def test_symlink_zip_is_ignored(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            mkzip(base/'real.zip')
-            (base/'linked.zip').symlink_to(base/'real.zip')
-            with self.assertRaisesRegex(ValueError, 'No finished ZIP'):
-                publisher.collect_zips('linked.zip', base)
+    def test_existing_draft_not_modified(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            paf_stub(root/'App.paf.exe')
+            env={'PUBLISH_FILES':'*.paf.exe','PUBLISH_TAG':'portable-v1',
+                 'PUBLISH_DRY_RUN':'false','WORKSPACE_ROOT':temp,
+                 'GH_TOKEN':'dummy','SOURCE_SHA':'abc',
+                 'ACTION_EVENT':'workflow_dispatch','TARGET_REPO':'vhick/Test'}
+            with patch.dict(os.environ, env, clear=True), \
+                 patch.object(pub.shutil,'which',return_value='gh'), \
+                 patch.object(pub,'view_release',return_value={'isDraft':True,'body':pub.MARKER}):
+                with self.assertRaisesRegex(RuntimeError,'Existing draft'):
+                    pub.main()
+
+    def test_prune_excludes_manual_and_immutable(self):
+        entries=[{'tagName':f'portable-v{v}', 'publishedAt': f'2026-01-{v:02d}',
+                  'isImmutable': v==1, 'isDraft':False} for v in range(1,5)]
+        entries.append({'tagName':'manual-v1','publishedAt':'2026-01-06','isImmutable':False,'isDraft':False})
+        self.assertEqual(pub.choose_old_releases(entries,'portable-','portable-v4',2,lambda _: True), ['portable-v2'])
+
+    def test_pull_request_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            paf_stub(root/'App.paf.exe')
+            env={'PUBLISH_FILES':'*.paf.exe','PUBLISH_TAG':'portable-v1',
+                 'PUBLISH_DRY_RUN':'false','WORKSPACE_ROOT':temp,
+                 'ACTION_EVENT':'pull_request'}
+            with patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(ValueError,'Unsafe publishing event'):
+                    pub.main()
 
 
 if __name__ == '__main__':

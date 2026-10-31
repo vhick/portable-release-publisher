@@ -1,4 +1,4 @@
-name: Validate portable publisher
+name: Validate portable release publisher
 on:
   push:
     branches: [main]
@@ -11,9 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout publisher
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Run local tests
+      - name: Test ZIP and PAF publisher logic
         run: python -m unittest discover -s tests -v

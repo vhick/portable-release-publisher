@@ -1,0 +1,9 @@
+# Example STEP ONLY. This is NOT a standalone workflow.
+- name: Publish PortableApps installer
+  uses: vhick/portable-release-publisher@v1.1.0
+  with:
+    files: 'dist/*.paf.exe'
+    tag: 'portable-v1.2.3-r1'
+    keep-releases: '3'
+    prune: 'false'
+    dry-run: 'true'
